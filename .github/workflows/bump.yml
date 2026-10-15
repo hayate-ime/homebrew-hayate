@@ -1,0 +1,109 @@
+# 新しい版が出たら cask を追いつかせる。
+#
+# 毎日、サイトのダウンロードの先の版を brew livecheck で読み、cask より新しければ
+# .pkg の署名と公証を確かめて、Casks/hayate.rb の version と sha256 を書き換える。
+name: bump
+
+on:
+  schedule:
+    - cron: "17 2 * * *" # 毎日 11:17 JST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: macos-latest
+    steps:
+      - name: tap
+        run: brew tap hayate-ime/hayate
+
+      - name: livecheck
+        id: check
+        run: |
+          set -euo pipefail
+          brew livecheck --cask --json hayate-ime/hayate/hayate > livecheck.json
+          cat livecheck.json
+          current="$(jq -r '.[0].version.current' livecheck.json)"
+          latest="$(jq -r '.[0].version.latest' livecheck.json)"
+          if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+            echo "::error::livecheck が版を読めなかった"; exit 1
+          fi
+          echo "current=$current latest=$latest"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          outdated="$(jq -r '.[0].version.outdated' livecheck.json)"
+          echo "outdated=$outdated" >> "$GITHUB_OUTPUT"
+
+      - name: 署名と公証を確かめ、sha256 を取る
+        if: steps.check.outputs.outdated == 'true'
+        id: pkg
+        env:
+          VERSION: ${{ steps.check.outputs.latest }}
+          # Hayate の Developer ID Installer のチーム ID。
+          TEAM_ID: MVU3Q63D6N
+        run: |
+          set -euo pipefail
+          # 版はサイトの HTML から読んだもの。URL とファイル名に入るので形を絞る。
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+)+$'; then
+            echo "::error::版の形がおかしい: $VERSION"; exit 1
+          fi
+          url="https://downloads.hayate.im/Hayate-${VERSION}.pkg"
+          curl -fsSL --retry 2 -o Hayate.pkg "$url"
+          sig="$(pkgutil --check-signature Hayate.pkg)"
+          echo "$sig"
+          grep -Fxq "   Status: signed by a developer certificate issued by Apple for distribution" <<<"$sig"
+          grep -Fxq "   Notarization: trusted by the Apple notary service" <<<"$sig"
+          # 鎖の 1 番目（署名した証明書）が Hayate のチームのもの、2・3 番目が Apple のもの。
+          grep -Eq "^    1\. Developer ID Installer: .+ \(${TEAM_ID}\)\$" <<<"$sig" \
+            || { echo "::error::署名したのがチーム ${TEAM_ID} ではない"; exit 1; }
+          grep -Fxq "    2. Developer ID Certification Authority" <<<"$sig"
+          grep -Fxq "    3. Apple Root CA" <<<"$sig"
+          # cask に書く値は、いま確かめたこのファイルから自分で取る。
+          sha="$(shasum -a 256 Hayate.pkg | cut -d' ' -f1)"
+          echo "sha256=$sha"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: cask を書き換える
+        if: steps.check.outputs.outdated == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.latest }}
+          SHA256: ${{ steps.pkg.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          brew bump-cask-pr --write-only --no-audit \
+            --version "$VERSION" hayate-ime/hayate/hayate
+          tap="$(brew --repo hayate-ime/hayate)"
+          git -C "$tap" diff
+          # 書かれた値が、確かめたファイルのものと同じか。
+          cask="$tap/Casks/hayate.rb"
+          written_version="$(sed -nE 's/^  version "([^"]+)"$/\1/p' "$cask")"
+          written_sha="$(sed -nE 's/^  sha256 "([0-9a-f]{64})"$/\1/p' "$cask")"
+          if [ "$written_version" != "$VERSION" ]; then
+            echo "::error::cask の version が $written_version（期待は $VERSION）"; exit 1
+          fi
+          if [ "$written_sha" != "$SHA256" ]; then
+            echo "::error::cask の sha256 が $written_sha、確かめた .pkg は $SHA256"; exit 1
+          fi
+          brew style "$cask"
+          # audit はパス指定が禁止されている（名前で呼ぶ）
+          brew audit --cask --online hayate-ime/hayate/hayate
+
+      - name: コミットして push
+        if: steps.check.outputs.outdated == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.latest }}
+          SHA256: ${{ steps.pkg.outputs.sha256 }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tap="$(brew --repo hayate-ime/hayate)"
+          cd "$tap"
+          grep -Fxq "  sha256 \"$SHA256\"" Casks/hayate.rb \
+            || { echo "::error::push の直前で cask の sha256 が確かめた値と違う"; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/hayate.rb
+          git commit -m "hayate ${VERSION}"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/hayate-ime/homebrew-hayate.git" HEAD:main
