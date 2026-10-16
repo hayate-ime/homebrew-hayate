@@ -1,7 +1,7 @@
 # Hayate の Homebrew cask。version と sha256 は .github/workflows/bump.yml が書き換える。
 cask "hayate" do
-  version "0.1.5"
-  sha256 "509d72973cbc3f52e2e0637d6c768e5e0bc78f7fdbdfffd294d9c6f09161836a"
+  version "0.1.6"
+  sha256 "bfd720cd47bcefe704c5bc39f9208942c8490b0c52b2acdc1605777f8ec6d52d"
 
   url "https://downloads.hayate.im/Hayate-#{version}.pkg"
   name "Hayate"
