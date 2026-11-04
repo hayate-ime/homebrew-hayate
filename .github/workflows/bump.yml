@@ -17,7 +17,12 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: tap
-        run: brew tap hayate-ime/hayate
+        # Homebrew 7 から、公式でない tap の cask は信頼の印が無いと読まない
+        # （"Refusing to load cask ... from untrusted tap"）。2026-10-31 からこの段で
+        # 落ち、0.1.17 に上がらなかった。自分の tap なので信頼する。
+        run: |
+          brew tap hayate-ime/hayate
+          brew trust --tap hayate-ime/hayate
 
       - name: livecheck
         id: check
